@@ -1,0 +1,249 @@
+---
+title: "Spam Email Dataset Analysis"
+author: "Tiffany"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE, include = TRUE,
+                      fig.align = "center",  out.width = "80%")
+```
+
+## Load libraries
+
+```{r}
+library(tidyverse)
+library(tidytuesdayR)
+library(reshape2)
+library(caTools)
+library(e1071) 
+library(caret)
+library(randomForest)
+```
+
+## Load dataset
+
+```{r}
+tuesdata <- tidytuesdayR::tt_load('2023-08-15')
+spam <- tuesdata$spam
+```
+## EDA
+### Overview of dataset
+```{r}
+glimpse(spam)
+```
+### Numeric variables summary
+```{r}
+summary(spam)
+```
+
+
+##Ratio of spam to non-spam
+```{r}
+unique(spam$yesno)
+n_yes = nrow(spam[spam$yesno=="y",])
+n_no = nrow(spam[spam$yesno=="n",])
+pct_yes = round(n_yes/nrow(spam)*100,2)
+pct_no = round(n_no/nrow(spam)*100,2)
+print(paste0("Number of spam records: ", n_yes))
+print(paste0("% of spam: ", pct_yes,"%"))
+print(paste0("Number of non-spam records: ", n_no))
+print(paste0("% of non-spam: ", pct_no,"%"))
+pie(c(n_yes,n_no), labels= c(pct_yes,pct_no), main="% of spam to non-spam", col=rainbow(2))
+legend("bottomright",c("% spam","% non-spam"), fill=rainbow(2))
+```
+```{r}
+corr_mat <- round(cor(spam %>% select(-yesno)),2)
+head(corr_mat)
+melted_corr_mat <- melt(corr_mat)
+ggplot(melted_corr_mat, aes(x = Var1, y = Var2, fill=value))+
+  geom_tile()+
+  geom_text(aes(Var1, Var2, label = value), 
+          color = "black", size = 4)+
+  labs(x="",y="",title="Correlation matrix")+
+  scale_fill_gradient(low="deepskyblue",high="dodgerblue4")
+```
+##Prepare data
+```{r}
+spam_clean = spam %>% 
+  na.omit()%>%
+  rename("status"=yesno)%>%
+  mutate(status=as.factor(recode(status,"y"=1,"n"=0)))
+
+```
+
+##Split dataset into training and testing set
+
+```{r}
+split = sample.split(spam_clean$status, SplitRatio = 0.75)
+train = subset(spam_clean, split == TRUE)
+test = subset(spam_clean, split == FALSE)
+
+
+#Feature scaling (excluding last column of target variable)
+#train[-7] = scale(train[-7])
+#test[-7] = scale(test[-7])
+```
+## Find initial fit of model in both radial and linear for comparison
+### Construct basic svm model with linear kernel
+```{r}
+svmfitL = svm(formula = status ~ ., 
+                 data = train, 
+                 type = 'C-classification', 
+                 kernel = 'linear') 
+print(svmfitL)
+summary(svmfitL)
+```
+### Find confusion matrix for initial linear svm model fit
+```{r}
+y.svm.predL = predict(svmfitL, newdata = test[-7])
+svm_cm_L = table(predict=y.svm.predL,truth=test$status)
+svm_cm_L
+print(paste("accuracy:",sum(diag(svm_cm_L)/sum(svm_cm_L))))
+```
+### Find initial fit for radial svm model
+```{r}
+svmfitR = svm(formula = status ~ ., 
+                 data = train, 
+                 type = 'C-classification', 
+                 kernel = 'radial') 
+print(svmfitR)
+summary(svmfitR)
+```
+### Find confusion matrix and accuracy of radial svm model
+```{r}
+y.svm.predR = predict(svmfitR, newdata = test[-7])
+svm_cm_R = table(predict=y.svm.predR,truth=test$status)
+svm_cm_R
+print(paste("accuracy:",sum(diag(svm_cm_R)/sum(svm_cm_R))))
+```
+Since accuracy for radial svm model is higher than linear, proceed with hyper-parameter tuning for the radial model
+## Hyperparameter tuning
+```{r}
+svm.tune.out = tune(svm, status~., data = train,
+                    kernel = "radial",
+                    ranges = list(cost = seq(1,10,by=1)),probability=TRUE)
+bestsvm = svm.tune.out$best.model
+svm.tune.out$best.parameters$cost
+```
+### List summary of parameters of best svm model
+```{r}
+summary(bestsvm)
+```
+
+## Evaluate performance of SVM model
+## Apply best SVM model on test dataset
+```{r}
+#best cost = 9
+y.svm.best = predict(bestsvm, newdata=test[-7])
+svm_cm_best = table(predict=y.svm.best,truth=test$status)
+svm_cm_best
+print(paste("accuracy:",sum(diag(svm_cm_best)/sum(svm_cm_best))))
+```
+## Derive confusion matrix for best svm model
+```{r}
+svm_best_cm = confusionMatrix(data=y.svm.best,reference=test$status,positive="1")
+```
+## Add set of input values and derive predicted probabilities of each class
+```{r}
+trial_input = data.frame(
+  Name=c('crl.tot','dollar','bang','money','n000','make'),
+  Value=(c(50.0,0.3,0.29,0.0,0.41,1.5)))%>% 
+  pivot_wider(names_from = Name, values_from = Value)
+
+trial_predict_svm = predict(bestsvm, newdata=trial_input, probability = TRUE)
+head(attr(trial_predict_svm,"probabilities"))
+trial_result_svm = as.data.frame(round(attr(trial_predict_svm,"probabilities"),2))%>%
+  rename(yes = as.factor(1), no = as.factor(0))
+```
+
+
+
+## Random Forest model
+### Create model
+
+```{r}
+rf = randomForest(x=train[-7],
+                  y=train$status,
+                  ntree=100)
+y.rf.pred = predict(rf, newdata = test[-7])
+```
+
+```{r}
+rf_cm = table(pred=y.rf.pred,truth=test$status)
+rf_cm
+print(paste("accuracy:",sum(diag(rf_cm)/sum(rf_cm))))
+```
+```{r}
+rf_grid = expand.grid(mtry=c(2,4,6,8,10))
+rf_trained = train(status ~.,
+                data=train,
+                method="rf",
+                trControl=trainControl(method="cv",number=10),
+                tuneGrid=rf_grid)
+summary(rf_trained)
+```
+
+
+```{r}
+rf_best = randomForest(x=train[-7],
+                  y=train$status,
+                  ntree=500,
+                  mtry = 2)
+y.rf.best = predict(rf_best,newdata=test[-7])
+rf_best_cm = confusionMatrix(y.rf.best,test$status, positive = "1")
+```
+
+```{r}
+trial_predict_rf = predict(rf_best, newdata=trial_input)
+trial_result_rf = as.data.frame(predict(rf_best, newdata=trial_input, type="prob"))%>%
+  rename(yes = as.factor(1), no = as.factor(0))%>%
+  select(yes,no)
+```
+
+## Summary of model performances
+```{r}
+# confusion matrix for best svm model = svm_best_cm
+# confusion matrix for best rf model = rf_best_cm
+
+summary = data.frame(
+  model = c("SVM","RF"),
+  accuracy = c(svm_best_cm$overall["Accuracy"],rf_best_cm$overall["Accuracy"]),
+  sensitivity = c(svm_best_cm$byClass["Sensitivity"], rf_best_cm$byClass["Sensitivity"]),
+  specificity = c(svm_best_cm$byClass["Specificity"],rf_best_cm$byClass["Specificity"]),
+  precision = c(svm_best_cm$byClass["Pos Pred Value"],rf_best_cm$byClass["Pos Pred Value"]),
+  neg_pred_value = c(svm_best_cm$byClass["Neg Pred Value"],rf_best_cm$byClass["Neg Pred Value"])
+)%>% pivot_longer(cols=c(2:6),names_to="metric",values_to="value")
+
+```
+
+```{r}
+#write.table(summary,"summary.csv",sep=",", quote = FALSE, row.names = FALSE, col.names = TRUE)
+```
+
+### plot to compare models performances
+```{r}
+
+ggplot(summary,aes(x=metric,y=value,fill=model))+
+  geom_col(position="dodge")+
+  geom_text(aes(label=round(value,3), y=value+0.05), position=position_dodge(width = 1))+
+  labs(title="Performance Metrics of Models", y="", x="")+
+  scale_fill_manual(values = c("indianred2","dodgerblue3"))+
+  theme_minimal()+
+  theme(
+    text = element_text(size = 15),
+    plot.title =element_text(hjust = 0.5,size = 15),
+    legend.position = "top")
+  
+```
+
+
+
+
+
+
+
+
+
+
